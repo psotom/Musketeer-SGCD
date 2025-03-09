@@ -26,6 +26,7 @@ def uniform_coordinate_descent(x0, f, grad_f, steps, gamma):
     At each iteration one coordinate is sampled uniformly and updated.
     """
     x = x0.copy()
+    gamma = np.atleast_1d(gamma)
     p = len(x)
     history = []
     coord_evals = []
@@ -33,7 +34,8 @@ def uniform_coordinate_descent(x0, f, grad_f, steps, gamma):
     for t in range(steps):
         k = np.random.randint(0, p)
         g = grad_f(x, k)
-        x[k] = x[k] - gamma * g
+        gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
+        x[k] = x[k] - gamma_t * g
         eval_count += 1  # one coordinate evaluation
         history.append(f(x))
         coord_evals.append(eval_count)
@@ -48,9 +50,11 @@ def gradient_descent(x0, f, grad_f, steps, gamma):
     history = []
     coord_evals = []
     eval_count = 0
+    gamma = np.atleast_1d(gamma)
     for t in range(steps):
         g = grad_f(x)
-        x = x - gamma * g
+        gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
+        x = x - gamma_t * g
         eval_count += len(x)  # full gradient evaluation counts as p evaluations
         history.append(f(x))
         coord_evals.append(eval_count)
@@ -80,6 +84,7 @@ def explore_phase(x, d, T, gamma, grad_f, gain_type):
       gain_vec : vector of averaged gains computed over T steps.
       evals    : number of coordinate evaluations (equals T here).
     """
+    gamma = np.atleast_1d(gamma)
     p = len(x)
     gain_vec = np.zeros(p)
     evals = 0
@@ -87,7 +92,8 @@ def explore_phase(x, d, T, gamma, grad_f, gain_type):
         # Sample a coordinate index k according to distribution d.
         k = np.random.choice(p, p=d)
         g = grad_f(x, k)
-        x[k] = x[k] - gamma * g
+        gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
+        x[k] = x[k] - gamma_t * g
         
         # Accumulate gain for coordinate k.
         # Importance sampling update: scale the coordinate update by 1/d[k]
@@ -151,13 +157,15 @@ def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs')
     d = np.ones(p) / p          # d0 = (1/p,...,1/p)
     G = np.zeros(p)             # G0 = (0,...,0)
     x = x0.copy()
+    gamma = np.atleast_1d(gamma)
     
     history = []
     evals = []
     eval_count = 0
 
     for n in range(epochs):
-        x, gain_phase, evals_phase = explore_phase(x, d, T, gamma, grad_f, gain_type)
+        gamma_n = gamma[n * T: (n + 1) * T] if (n + 1) * T < len(gamma) else np.atleast_1d(gamma[-1])
+        x, gain_phase, evals_phase = explore_phase(x, d, T, gamma_n, grad_f, gain_type)
         eval_count += evals_phase
         history.append(f(x))
         evals.append(eval_count)
@@ -189,10 +197,14 @@ def run_musketeer_experiment():
     x0 = np.zeros(p)
     L_max = np.max(np.diag(A))
     # For our quadratic, a full gradient descent would use gamma = 1/L_max.
-    # MUSKETEER is a coordinate descent algorithm so we need to devide by p
-    gamma = 1.0 / (L_max * p)   # this is one possible choice; tuning may be required.
-    
-    epochs = 1000              # number of outer iterations (each with T exploration steps)
+    epochs = 2000              # number of outer iterations (each with T exploration steps)
+    T = int(np.sqrt(p))
+    steps = epochs * T
+    gamma_0 = 10
+    gamma = gamma_0 * p / (gamma_0 * p * L_max + np.arange(steps))   # this is one possible choice; tuning may be required.
+    gamma_gd = gamma_0 / (gamma_0 * L_max + np.arange(epochs))
+    #gamma = 1.0 / (L_max * p + np.zeros(epochs))
+
     T = int(np.sqrt(p))       # exploration phase length (as suggested in the paper)
     lambda_seq = 0.1 * np.ones(epochs)  # fixed exploration weight (can also be scheduled, e.g., 1/log(n))
     eta = 1.0                 # softmax parameter for probability update
@@ -202,7 +214,7 @@ def run_musketeer_experiment():
     x_final, history_sqr, evals_sqr = musketeer(x0, f_gap, grad_coord, epochs, T, gamma, lambda_seq, eta, 'sqr')
     x_final, history_avg, evals_avg = musketeer(x0, f_gap, grad_coord, epochs, T, gamma, lambda_seq, eta, 'avg')
     x_ucd, history_ucd, evals_ucd = uniform_coordinate_descent(x0, f_gap, grad_coord, epochs * T, gamma)
-    x_gcd, history_gcd, evals_gcd = gradient_descent(x0, f_gap, grad, int(epochs * T / p), gamma)
+    x_gcd, history_gcd, evals_gcd = gradient_descent(x0, f_gap, grad, int(epochs * T / p), gamma_gd)
     
     print("Final optimality gap: {:.3e}".format(history[-1]))
     plt.figure(figsize=(8, 5))
