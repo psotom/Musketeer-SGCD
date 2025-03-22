@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
-from methods import uniform_coordinate_descent, gradient_descent, musketeer
+from methods import uniform_coordinate_descent, gradient_descent, musketeer, musketeer2
 
 # Ridge Regression
 def f_ridge(theta, X, y, mu):
@@ -107,17 +107,20 @@ if __name__ == '__main__':
     T = int(np.sqrt(p))
     epochs_musketeer = total_evals // T
     # Choose learning rate (may need tuning)
-    gamma_0 = 1
-    k0 = 10
+    gamma_0 = 10 # 3 for ridge, 10 for logistic
+    k0 = 5 # 10 for ridge, 5 for logistic
     gamma = gamma_0 * p / (gamma_0 * p * k0 + np.arange(steps_cd))   # this is one possible choice; tuning may be required.
     gamma_gd = gamma_0 / (gamma_0 * k0 + np.arange(steps_gd))
     print(gamma[0], gamma[-1], gamma_gd[0], gamma_gd[-1])
+    gamma = 0.1
+    gamma_gd = 0.1
 
     # For MUSKETEER, set lambda sequence and eta parameter.
     lambda_val = 100
     lambda_base = 3
     lambda_seq = 1 / np.log(lambda_base + lambda_val * np.arange(epochs_musketeer))
     print(lambda_seq[0], lambda_seq[-1])
+    lambda_seq = 0.5 # for softmax
     eta = 1.0
     gain_type = 'abs'  # could be 'avg' or 'sqr' as well
 
@@ -142,7 +145,7 @@ if __name__ == '__main__':
     plt.semilogy(evals_musk, history_musk - f(theta_star), label='MUSKETEER')
     plt.xlabel('Coordinate Evaluations')
     plt.ylabel('Objective Value')
-    plt.title(f"Regularized {model_type.capitalize()} Regression Comparison")
+    plt.title(f"Regularized {model_type.capitalize()} Regression Comparison, with " + r"$\alpha$ =" + str(int(alpha)))
     plt.legend()
     plt.grid(True)
     plt.savefig(model_type)

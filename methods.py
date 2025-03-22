@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # -------------------------
 # Quadratic Example
@@ -20,28 +21,35 @@ def quadratic_gradient(x, A, b):
 # Descent methods
 # -------------------------
 
-def uniform_coordinate_descent(x0, f, grad_f, steps, gamma):
+def uniform_coordinate_descent(x0, f, grad_f, steps, gamma, eval_each=1, callback=None, n_calls=1):
     """
     Uniform coordinate descent.
     At each iteration one coordinate is sampled uniformly and updated.
     """
+
     x = x0.copy()
     gamma = np.atleast_1d(gamma)
     p = len(x)
     history = []
     coord_evals = []
     eval_count = 0
-    for t in range(steps):
-        k = np.random.randint(0, p)
-        g = grad_f(x, k)
-        gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
-        x[k] = x[k] - gamma_t * g
-        eval_count += 1  # one coordinate evaluation
+    evals = steps // eval_each
+    for ev in tqdm(range(evals)):
         history.append(f(x))
+        for t in range(ev * eval_each, (ev + 1) * eval_each):
+            k = np.random.randint(0, p)
+            g = grad_f(x, k)
+            gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
+            x[k] = x[k] - gamma_t * g
+        eval_count += eval_each
         coord_evals.append(eval_count)
+
+        if callback is not None and ev % n_calls == 0:
+            callback(x, eval_count)
+
     return x, np.array(history), np.array(coord_evals)
 
-def gradient_descent(x0, f, grad_f, steps, gamma):
+def gradient_descent(x0, f, grad_f, steps, gamma, callback=None):
     """
     Full gradient descent.
     Each iteration uses the full gradient (p coordinate evaluations).
@@ -51,13 +59,17 @@ def gradient_descent(x0, f, grad_f, steps, gamma):
     coord_evals = []
     eval_count = 0
     gamma = np.atleast_1d(gamma)
-    for t in range(steps):
+    for t in tqdm(range(steps)):
+        history.append(f(x))
         g = grad_f(x)
         gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
         x = x - gamma_t * g
         eval_count += len(x)  # full gradient evaluation counts as p evaluations
-        history.append(f(x))
         coord_evals.append(eval_count)
+
+        if callback is not None:
+            callback(x, eval_count)
+
     return x, np.array(history), np.array(coord_evals)
 
 # -------------------------
@@ -110,7 +122,7 @@ def explore_phase(x, d, T, gamma, grad_f, gain_type):
     gain_vec /= T
     return x, gain_vec, evals
 
-def exploit_phase(G, gain_phase, n, lambda_n, eta):
+def exploit_phase(G, gain_phase, n, lambda_n, eta, r=0.8, norm='softmax'):
     """
     Exploitation phase: update cumulative gains and the sampling distribution.
     
@@ -125,14 +137,22 @@ def exploit_phase(G, gain_phase, n, lambda_n, eta):
       G_new : updated cumulative gain vector.
     """
 
-    G_new = G + (gain_phase - G) / (n + 1)
-    exp_etaG = np.exp(eta * G_new)
-    softmax = exp_etaG / np.sum(exp_etaG)
+    #G_new = G + (gain_phase - G) / (n + 1)
+    G_new = G + (gain_phase - G) / (r * n + 1)
+
+    if norm == 'l1':
+        d_g = np.abs(G_new) / np.sum(np.abs(G_new))
+    elif norm == 'softmax':
+        exp_etaG = np.exp(eta * G_new)
+        d_g = exp_etaG / np.sum(exp_etaG)
+    else:
+        raise ValueError
+
     p = len(G_new)
-    d_new = (1 - lambda_n) * softmax + lambda_n * (np.ones(p) / p)
+    d_new = (1 - lambda_n) * d_g + lambda_n * (np.ones(p) / p)
     return d_new, G_new
 
-def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs'):
+def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs', norm='softmax', callback=None, n_calls=1):
     """
     Implementation of MUSKETEER algorithm.
     
@@ -158,12 +178,14 @@ def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs')
     G = np.zeros(p)             # G0 = (0,...,0)
     x = x0.copy()
     gamma = np.atleast_1d(gamma)
-    
+    lambda_seq = np.atleast_1d(lambda_seq)
+
+
     history = []
     evals = []
     eval_count = 0
 
-    for n in range(epochs):
+    for n in tqdm(range(epochs)):
         gamma_n = gamma[n * T: (n + 1) * T] if (n + 1) * T < len(gamma) else np.atleast_1d(gamma[-1])
         x, gain_phase, evals_phase = explore_phase(x, d, T, gamma_n, grad_f, gain_type)
         eval_count += evals_phase
@@ -171,7 +193,142 @@ def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs')
         evals.append(eval_count)
         
         lambda_n = lambda_seq[n] if n < len(lambda_seq) else lambda_seq[-1]
-        d, G = exploit_phase(G, gain_phase, n, lambda_n, eta)
+        d, G = exploit_phase(G, gain_phase, n, lambda_n, eta, norm=norm)
+
+        print("iter: ", n + 1, " max diff is :", np.max(d) - np.min(d), "from coordinate ", np.argmax(d), "max gain is: ", np.max(G))
+
+        if callback is not None and n % n_calls == 0:
+            callback(x, eval_count)
+
+    return x, history, evals
+
+def explore_phase2(x, d, T, gamma, grad_f, gain_type):
+    """
+    Exploration phase of MUSKETEER.
+    
+    For T steps:
+      - Sample a coordinate k according to distribution d.
+      - Compute the gradient at coordinate k.
+      - Update x at coordinate k with an descent step: x[k] = x[k] - gamma * g.
+      - Accumulate the gain for coordinate k.
+      
+    The gain update rule is selected by gain_type:
+      - 'avg': raw gradient value,
+      - 'abs': absolute value,
+      - 'sqr': squared value.
+      
+    Returns:
+      x        : updated iterate after exploration
+      gain_vec : vector of averaged gains computed over T steps.
+      evals    : number of coordinate evaluations (equals T here).
+    """
+    gamma = np.atleast_1d(gamma)
+    p = len(x)
+    gain_vec = np.zeros(p)
+    evals = 0
+    gain_app = np.zeros(p)
+
+    for t in range(T):
+        # Sample a coordinate index k according to distribution d.
+        k = np.random.choice(p, p=d)
+        g = grad_f(x, k)
+        gamma_t = gamma[t] if t < len(gamma) else gamma[-1]
+        x[k] = x[k] - gamma_t * g
+        gain_app[k] += 1
+
+        # Accumulate gain for coordinate k.
+        # Importance sampling update: scale the coordinate update by 1/d[k]
+        if gain_type == 'abs':
+            gain_vec[k] += abs(g) / d[k]
+        elif gain_type == 'sqr':
+            gain_vec[k] += (g**2) / d[k]
+        elif gain_type == 'avg':
+            gain_vec[k] += g / d[k]
+        else:
+            raise ValueError("Invalid gain_type. Use 'avg', 'abs', or 'sqr'.")
+        evals += 1
+    
+    gain_vec /= p
+    return x, gain_vec, gain_app, evals
+
+def exploit_phase2(G, gain_phase, app, gain_app, lambda_n, eta=1.0, r=0.8, norm='softmax'):
+    """
+    Exploitation phase: update cumulative gains and the sampling distribution.
+    
+    - Update the cumulative gain G with a running average:
+         G_new = G + (gain_phase - G) / (n + 1)
+    - Compute a normalized version of G. We use a softmax operator with parameter eta.
+    - Mix the softmax probabilities with a uniform distribution using parameter lambda_n:
+         d_new = (1 - lambda_n) * softmax(eta * G_new) + lambda_n * (1/p)
+    
+    Returns:
+      d_new : updated coordinate sampling distribution.
+      G_new : updated cumulative gain vector.
+    """
+
+    #G_new = G + (gain_phase - G) / (n + 1)
+    G_new = (G * app + gain_phase) / (app + gain_app)
+
+    if norm == 'l1':
+        d_g = np.abs(G_new) / np.sum(np.abs(G_new))
+    elif norm == 'softmax':
+        exp_etaG = np.exp(eta * G_new)
+        d_g = exp_etaG / np.sum(exp_etaG)
+    else:
+        raise ValueError
+    
+    p = len(G_new)
+    d_new = (1 - lambda_n) * d_g + lambda_n * (np.ones(p) / p)
+    return d_new, G_new
+
+def musketeer2(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs', callback=None, n_calls=1):
+    """
+    Implementation of MUSKETEER algorithm.
+    
+    Parameters:
+      x0        : initial point in R^p.
+      f         : objective function.
+      grad_f    : function to compute gradient.
+      epochs    : number of outer iterations (each with an exploration phase).
+      T         : number of exploration steps per epoch (e.g., T ≈ sqrt(p)).
+      gamma     : step size for coordinate update.
+      lambda_seq: sequence (or constant) controlling the closeness of the
+                sampling distribution to the uniform one.
+      eta       : softmax parameter for normalizing cumulative gains.
+      gain_type : type of gain update ('avg', 'abs', or 'sqr').
+      
+    Returns:
+      x         : final point.
+      history   : list of f(x) values recorded after every coordinate evaluation.
+      evals     : list of cumulative coordinate evaluations.
+    """
+    p = len(x0)
+    d = np.ones(p) / p          # d0 = (1/p,...,1/p)
+    G = np.zeros(p)             # G0 = (0,...,0)
+    x = x0.copy()
+    gamma = np.atleast_1d(gamma)
+    lambda_seq = np.atleast_1d(lambda_seq)
+    appearences = np.ones(p)
+
+    history = []
+    evals = []
+    eval_count = 0
+
+    for n in tqdm(range(epochs)):
+        gamma_n = gamma[n * T: (n + 1) * T] if (n + 1) * T < len(gamma) else np.atleast_1d(gamma[-1])
+        x, gain_phase, gain_app, evals_phase = explore_phase2(x, d, T, gamma_n, grad_f, gain_type)
+        eval_count += evals_phase
+        history.append(f(x))
+        evals.append(eval_count)
+        
+        lambda_n = lambda_seq[n] if n < len(lambda_seq) else lambda_seq[-1]
+        d, G = exploit_phase2(G, gain_phase, appearences, gain_app, lambda_n, eta)
+        appearences += gain_app
+
+        print("iter: ", n + 1, " max diff is :", np.max(d) - np.min(d), "from coordinate ", np.argmax(d), "max gain is: ", np.max(G))
+        print("appears: ", appearences[:5], np.max(appearences))
+        if callback is not None and n % n_calls == 0:
+            callback(x, eval_count)
 
     return x, history, evals
 
