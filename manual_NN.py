@@ -3,11 +3,12 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-from methods import uniform_coordinate_descent, gradient_descent, musketeer, musketeer2
+from methods import uniform_coordinate_descent, gradient_descent, musketeer, musketeer2, grad_zeroth, grad_first, adam_grad_first
 import matplotlib.pyplot as plt
+import os
 
 def sigmoid(z):
-    return 1 / (1 + np.exp(-z))
+    return 1 / (1 + np.exp(-np.maximum(-50, z)))
 
 def sigmoid_grad(z):
     s = sigmoid(z)
@@ -143,13 +144,14 @@ def set_parameters_vector(model, theta):
     model.W2 = theta[W1_size+b1_size:W1_size+b1_size+W2_size].reshape(model.W2.shape)
     model.b2 = theta[W1_size+b1_size+W2_size:]
 
-def f_net(theta, model, X, y, loss_fn, batch_size=32):
+def f_net(theta, model, X, y, loss_fn, batch_size=32, batch_indices=None):
     """
     Computes the average loss over a mini-batch from (X, y) using a vectorized forward pass.
     """
     set_parameters_vector(model, theta)
     N = len(X)
-    batch_indices = np.random.choice(N, batch_size, replace=False)
+    if batch_indices is None:
+        batch_indices = np.random.choice(N, batch_size, replace=False)
     # Convert the mini-batch to a 2D NumPy array.
     X_batch = torch.stack([X[idx] for idx in batch_indices]).view(batch_size, -1).numpy()  # shape: (batch_size, input_size)
     # Forward pass in logits mode.
@@ -237,7 +239,7 @@ def compute_accuracy(theta, model, X, y):
     y_np = y.numpy().flatten() if isinstance(y, torch.Tensor) else np.array(y).flatten()
     return np.mean(preds == y_np)
 
-def run_experiment(dataset_name, batch_size=128):
+def run_experiment(dataset_name, batch_size=128, type='normal'):
     """
     Runs the optimization tests on either MNIST or Fashion-MNIST using mini-batches.
     Additionally, records both loss and accuracy during optimization.
@@ -279,14 +281,15 @@ def run_experiment(dataset_name, batch_size=128):
     print(f"{dataset_name}: Network parameter dimension p = {p}")
     
     # Evaluation budgets.
-    T = 234                     # For MUSKETEER (≈ √p)
-    total_evals = 100000
+    T = 225                     # For MUSKETEER (≈ √p)
+    total_evals = 300000
     steps_cd = total_evals                  # one coordinate evaluation per step in UCD
     steps_gd = total_evals // p             # full gradient descent (each step counts as p evaluations)
     epochs_musketeer = total_evals // T     # each epoch of MUSKETEER uses T coordinate evaluations
     
     # Learning rate.
-    gamma = 10
+    gamma = 1
+    gamma_adam = 0.2
 
     # Accuracy history lists.
     acc_history_cd = []
@@ -320,32 +323,206 @@ def run_experiment(dataset_name, batch_size=128):
     
     # Function handles with mini-batch evaluations.
     f = lambda theta: f_net(theta, model, X, y, loss_fn, batch_size)
-    grad = lambda theta, k=None: grad_net(theta, model, X, y, loss_fn, k, batch_size)
     
+    #grad = lambda theta, k=None: grad_net(theta, model, X, y, loss_fn, k, batch_size)
+    grad = lambda theta, k=None: grad_first(f, theta, h=1e-1, k=k)
+    N = len(X)
+    m = np.zeros_like(theta0)
+    v = np.zeros_like(theta0)
+    t = np.ones_like(theta0)
+
+    def grad(theta, k=None):
+        
+        batch_indices = np.random.choice(N, batch_size, replace=False)
+        f_2 = lambda theta: f_net(theta, model, X, y, loss_fn, batch_indices=batch_indices)
+        #g1 = grad_net(theta, model, X, y, loss_fn, k, batch_size)
+        # g1 = adam_grad_first(f_2, theta, m, v, t, h=1e-5, k=k)
+        # if k is not None:
+        #     t[k] += 1
+        # else:
+        #     t += 1
+        g = grad_first(f_2, theta, h=1e-5, k=k)
+        return g
+    
+    def grad_adam(theta, k=None, t=t):
+        
+        batch_indices = np.random.choice(N, batch_size, replace=False)
+        f_2 = lambda theta: f_net(theta, model, X, y, loss_fn, batch_indices=batch_indices)
+        #g1 = grad_net(theta, model, X, y, loss_fn, k, batch_size)
+        g1 = adam_grad_first(f_2, theta, m, v, t, h=1e-5, k=k)
+        return g1
+
     # Run the optimization methods.
     # Uncomment the ones you want to run.
     # set_parameters_vector(model, theta0)
     # theta_gd, history_gd, evals_gd = gradient_descent(theta0, f, grad, steps_gd, gamma, callback=callback_gd)
     # print(f"{dataset_name} - GD final loss: {f(theta_gd):.4f}")
-    
-    set_parameters_vector(model, theta0)
-    lambda_seq = 0.2
-    eta = 5.0         
-    gain_type = 'abs'
-    theta_musk, history_musk, evals_musk = musketeer2(theta0, f, grad, epochs_musketeer, T, gamma, lambda_seq, eta, gain_type, callback=callback_musk, n_calls=10)
-    print(f"{dataset_name} - MUSKETEER final loss: {f(theta_musk):.4f}")
 
     set_parameters_vector(model, theta0)
-    theta_cd, history_cd, evals_cd = uniform_coordinate_descent(theta0, f, grad, steps_cd, gamma, eval_each=T, callback=callback_cd, n_calls=10)
-    print(f"{dataset_name} - UCD final loss: {f(theta_cd):.4f}")
+    lambda_seq = 0.2
+    eta = 5.0
+    gain_type = 'sqr'
+    theta_musk, history_musk_sqr, evals_musk = musketeer(theta0, f, grad, epochs_musketeer, T, gamma, lambda_seq, eta, gain_type, norm='l1', callback=callback_musk, n_calls=25)
+    acc_history_musk_sqr = acc_history_musk
+    acc_history_musk = []
+    print(f"{dataset_name} - MUSKETEER square final loss: {f(theta_musk):.4f}")
+
+    if type == 'normal':
+        gain_type = 'avg'
+        t = np.ones_like(theta0)
+        set_parameters_vector(model, theta0)
+        theta_musk, history_musk_avg, evals_musk = musketeer(theta0, f, grad, epochs_musketeer, T, gamma, lambda_seq, eta, gain_type, norm='l1', callback=callback_musk, n_calls=25)
+        acc_history_musk_avg = acc_history_musk
+        acc_history_musk = []
+        print(f"{dataset_name} - MUSKETEER average final loss: {f(theta_musk):.4f}")
+
+        gain_type = 'abs'
+        t = np.ones_like(theta0)
+        set_parameters_vector(model, theta0)
+        theta_musk, history_musk_abs, evals_musk = musketeer(theta0, f, grad, epochs_musketeer, T, gamma, lambda_seq, eta, gain_type, norm='l1', callback=callback_musk, n_calls=25)
+        acc_history_musk_abs = acc_history_musk
+        acc_history_musk = []
+        print(f"{dataset_name} - MUSKETEER absolute final loss: {f(theta_musk):.4f}")
     
-    # Plot loss and accuracy evolution.
+    elif type == 'adam':
+        set_parameters_vector(model, theta0)
+        gain_type = 'abs'
+        t = np.ones_like(theta0)
+        theta_musk, history_musk_adam, evals_musk = musketeer(theta0, f, grad_adam, epochs_musketeer, T, gamma_adam, lambda_seq, eta, gain_type, norm='l1', callback=callback_musk, n_calls=25)
+        acc_history_musk_adam = acc_history_musk
+        acc_history_musk = []
+        print(f"{dataset_name} - MUSKETEER adam final loss: {f(theta_musk):.4f}")
+
+        t = np.ones_like(theta0)
+        set_parameters_vector(model, theta0)
+        theta_cd, history_cd_adam, evals_cd = uniform_coordinate_descent(theta0, f, grad_adam, steps_cd, gamma_adam, eval_each=T, callback=callback_cd, n_calls=25)
+        print(f"{dataset_name} - UCD adam final loss: {f(theta_cd):.4f}")
+        acc_history_cd_adam = acc_history_cd
+        acc_history_cd = []
+    
+    set_parameters_vector(model, theta0)
+    theta_cd, history_cd, evals_cd = uniform_coordinate_descent(theta0, f, grad, steps_cd, gamma, eval_each=T, callback=callback_cd, n_calls=25)
+    print(f"{dataset_name} - UCD final loss: {f(theta_cd):.4f}")
+
+    if type == 'normal':
+        return evals_cd, history_cd, history_musk_sqr, history_musk_avg, history_musk_abs, acc_history_cd, acc_history_musk_sqr, acc_history_musk_avg, acc_history_musk_abs
+    else:
+        return evals_cd, history_cd, history_musk_sqr, history_musk_adam, history_cd_adam, acc_history_cd, acc_history_musk_sqr, acc_history_musk_adam, acc_history_cd_adam
+    
+NUM_EXP = 10
+# -----------------------------
+# Example usage:
+# -----------------------------
+if __name__ == "__main__":
+    dataset_name = 'FashionMNIST'
+    type = 'adam'
+    save_folder = "./results/" + dataset_name + "/" + type + "_"
+    musk_sqr, musk_sqr_acc = [], []
+    musk_avg, musk_avg_acc = [], []
+    musk_abs, musk_abs_acc = [], []
+    cd_exp, cd_acc = [], []
+
+    if os.path.isfile(save_folder + "musk_sqr_history.npy"):
+        musk_sqr = np.load(save_folder + "musk_sqr_history.npy")
+        musk_sqr_acc = np.load(save_folder + "musk_sqr_acc.npy")
+        musk_avg = np.load(save_folder + "musk_avg_history.npy")
+        musk_avg_acc = np.load(save_folder + "musk_avg_acc.npy")
+        musk_abs = np.load(save_folder + "musk_abs_history.npy")
+        musk_abs_acc = np.load(save_folder + "musk_abs_acc.npy")
+
+        cd_exp = np.load(save_folder + "cd_history.npy")
+        cd_acc = np.load(save_folder + "cd_acc.npy")
+        x = np.load(save_folder + "x.npy")
+        x_acc = np.load(save_folder + "x_acc.npy")
+        
+
+    else:
+        for _ in range(NUM_EXP):
+            (
+             x, history_cd, history_musk_sqr, history_musk_avg,
+             history_musk_abs, acc_history_cd, acc_history_musk_sqr,
+             acc_history_musk_avg, acc_history_musk_abs
+            ) = run_experiment(dataset_name, batch_size=32, type=type)
+
+            musk_sqr.append(history_musk_sqr)
+            x_acc, acc = zip(*acc_history_musk_sqr)
+            musk_sqr_acc.append(acc)
+
+            musk_avg.append(history_musk_avg)
+            x_acc, acc = zip(*acc_history_musk_avg)
+            musk_avg_acc.append(acc)
+
+            musk_abs.append(history_musk_abs)
+            x_acc, acc = zip(*acc_history_musk_abs)
+            musk_abs_acc.append(acc)
+
+            cd_exp.append(history_cd)
+            x_acc, acc = zip(*acc_history_cd)
+            cd_acc.append(acc)
+
+        musk_sqr = np.array(musk_sqr)
+        musk_sqr_acc = np.array(musk_sqr_acc)
+
+        musk_avg = np.array(musk_avg)
+        musk_avg_acc = np.array(musk_avg_acc)
+
+        musk_abs = np.array(musk_abs)
+        musk_abs_acc = np.array(musk_abs_acc)
+
+        cd_exp = np.array(cd_exp)
+        cd_acc = np.array(cd_acc)
+
+        np.save(save_folder + "musk_sqr_history", musk_sqr)
+        np.save(save_folder + "musk_sqr_acc", musk_sqr_acc)
+        np.save(save_folder + "musk_avg_history", musk_avg)
+        np.save(save_folder + "musk_avg_acc", musk_avg_acc)
+        np.save(save_folder + "musk_abs_history", musk_abs)
+        np.save(save_folder + "musk_abs_acc", musk_abs_acc)
+        np.save(save_folder + "cd_history", cd_exp)
+        np.save(save_folder + "cd_acc", cd_acc)
+        np.save(save_folder + "x", x)
+        np.save(save_folder + "x_acc", x_acc)
+
+    # Compute mean and standard deviation for the loss curves.
+    musk_sqr_mean = np.mean(musk_sqr, axis=0)
+    musk_sqr_std = np.std(musk_sqr, axis=0)
+    musk_avg_mean = np.mean(musk_avg, axis=0)
+    musk_avg_std = np.std(musk_avg, axis=0)
+    musk_abs_mean = np.mean(musk_abs, axis=0)
+    musk_abs_std = np.std(musk_abs, axis=0)
+    cd_mean = np.mean(cd_exp, axis=0)
+    cd_std = np.std(cd_exp, axis=0)
+
+    # Compute mean and standard deviation for the accuracy curves.
+    musk_sqr_acc_mean = np.mean(musk_sqr_acc, axis=0)
+    musk_sqr_acc_std = np.std(musk_sqr_acc, axis=0)
+    musk_avg_acc_mean = np.mean(musk_avg_acc, axis=0)
+    musk_avg_acc_std = np.std(musk_avg_acc, axis=0)
+    musk_abs_acc_mean = np.mean(musk_abs_acc, axis=0)
+    musk_abs_acc_std = np.std(musk_abs_acc, axis=0)
+    
+    cd_acc_mean = np.mean(cd_acc, axis=0)
+    cd_acc_std = np.std(cd_acc, axis=0)
+
     fig, axs = plt.subplots(1, 2, figsize=(14, 5))
     
+
     # Loss curves.
-    axs[0].plot(evals_cd, history_cd, label='UCD')
-    #axs[0].plot(evals_gd, history_gd, label='GD')
-    axs[0].plot(evals_musk, history_musk, label='MUSKETEER')
+    axs[0].plot(x, cd_mean, label='UCD')
+    axs[0].fill_between(x, cd_mean - cd_std, cd_mean + cd_std, color='gray', alpha=0.2)
+    axs[0].plot(x, musk_sqr_mean, label='MUSKETEER sqr')
+    axs[0].fill_between(x, musk_sqr_mean - musk_sqr_std, musk_sqr_mean + musk_sqr_std, alpha=0.2)
+    if type == 'normal':
+        axs[0].plot(x, musk_avg_mean, label='MUSKETEER avg')
+        axs[0].fill_between(x, musk_avg_mean - musk_avg_std, musk_avg_mean + musk_avg_std, color='gray', alpha=0.2)
+        axs[0].plot(x, musk_abs_mean, label='MUSKETEER abs')
+        axs[0].fill_between(x, musk_abs_mean - musk_abs_std, musk_abs_mean + musk_abs_std, color='gray', alpha=0.2)
+    else:
+        axs[0].plot(x, musk_abs_mean, label='UCD Adam')
+        axs[0].fill_between(x, musk_abs_mean - musk_abs_std, musk_abs_mean + musk_abs_std, color='gray', alpha=0.2)
+        axs[0].plot(x, musk_avg_mean, label='MUSKETEER Adam')
+        axs[0].fill_between(x, musk_avg_mean - musk_avg_std, musk_avg_mean + musk_avg_std, color='gray', alpha=0.2)
+    
     axs[0].set_xlabel('Coordinate Evaluations')
     axs[0].set_ylabel('Training Loss')
     axs[0].set_title(f'{dataset_name}: Loss Evolution')
@@ -353,25 +530,26 @@ def run_experiment(dataset_name, batch_size=128):
     axs[0].grid(True)
     
     # Accuracy curves.
-    if acc_history_cd:
-        evals_acc_cd, acc_cd = zip(*acc_history_cd)
-        axs[1].plot(evals_acc_cd, acc_cd, label='UCD')
-    if acc_history_gd:
-        evals_acc_gd, acc_gd = zip(*acc_history_gd)
-        axs[1].plot(evals_acc_gd, acc_gd, label='GD')
-    if acc_history_musk:
-        evals_acc_musk, acc_musk = zip(*acc_history_musk)
-        axs[1].plot(evals_acc_musk, acc_musk, label='MUSKETEER')
+    axs[1].plot(x_acc, cd_acc_mean, label='UCD')
+    axs[1].fill_between(x_acc, cd_acc_mean - cd_acc_std, cd_acc_mean + cd_acc_std, alpha=0.2)
+    axs[1].plot(x_acc, musk_sqr_acc_mean, label='MUSKETEER sqr')
+    axs[1].fill_between(x_acc, musk_sqr_acc_mean - musk_sqr_acc_std, musk_sqr_acc_mean + musk_sqr_acc_std, alpha=0.2)
+    if type == 'normal':
+        axs[1].plot(x_acc, musk_avg_acc_mean, label='MUSKETEER avg')
+        axs[1].fill_between(x_acc, musk_avg_acc_mean - musk_avg_acc_std, musk_avg_acc_mean + musk_avg_acc_std, color='gray', alpha=0.2)
+        axs[1].plot(x_acc, musk_abs_acc_mean, label='MUSKETEER abs')
+        axs[1].fill_between(x_acc, musk_abs_acc_mean - musk_abs_acc_std, musk_abs_acc_mean + musk_abs_acc_std, color='gray', alpha=0.2)
+    else:
+        axs[1].plot(x_acc, musk_abs_acc_mean, label='UCD Adam')
+        axs[1].fill_between(x_acc, musk_abs_acc_mean - musk_abs_acc_std, musk_abs_acc_mean + musk_abs_acc_std, color='gray', alpha=0.2)
+        axs[1].plot(x_acc, musk_avg_acc_mean, label='MUSKETEER Adam')
+        axs[1].fill_between(x_acc, musk_avg_acc_mean - musk_avg_acc_std, musk_avg_acc_mean + musk_avg_acc_std, color='gray', alpha=0.2)
+
     axs[1].set_xlabel('Coordinate Evaluations')
     axs[1].set_ylabel('Accuracy')
     axs[1].set_title(f'{dataset_name}: Accuracy Evolution')
     axs[1].legend()
     axs[1].grid(True)
     
+    plt.savefig(dataset_name + '_l1_' + type)
     plt.show()
-
-# -----------------------------
-# Example usage:
-# -----------------------------
-if __name__ == "__main__":
-    run_experiment('MNIST', batch_size=32)

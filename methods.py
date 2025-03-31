@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
+
 # -------------------------
 # Quadratic Example
 # -------------------------
@@ -16,6 +17,103 @@ def quadratic_gradient(x, A, b):
     Gradient of the quadratic function: ∇f(x) = A x - b.
     """
     return A @ x - b
+
+# Zeroth order: Random direction finite-difference estimator.
+# Only uses function evaluations.
+def grad_zeroth(f, theta, h=1e-5, num_samples=1):
+    grad_est = np.zeros_like(theta)
+    for _ in range(num_samples):
+        u = np.random.randn(*theta.shape)
+        u /= np.linalg.norm(u)
+        grad_est += (f(theta + h * u) - f(theta)) / h * u
+    return grad_est / num_samples
+
+# First order: Coordinate-wise central finite-difference estimator.
+def grad_first(f, theta, h=1e-5, k=None):
+    if k is not None:
+        e = np.zeros_like(theta)
+        e[k] = 1
+        grad = (f(theta + h * e) - f(theta - h * e)) / (2 * h)
+        if np.isnan(grad).any():
+            print("NAAAAAAANS first")
+            print(f(theta + h * e), f(theta - h * e), h)
+        return grad
+
+    grad_est = np.zeros_like(theta)
+    for i in range(len(theta)):
+        e = np.zeros_like(theta)
+        e[i] = 1
+        grad_est[i] = (f(theta + h * e) - f(theta - h * e)) / (2 * h)
+    return grad_est
+
+def adam_grad_first(f, theta, m, v, t, h=1e-5, k=None, 
+                      beta1=0.9, beta2=0.999, epsilon=1e-8):
+    """
+    Compute finite-difference gradient estimates and update Adam moment estimates
+    for a given coordinate or for all coordinates.
+    
+    Parameters:
+      f       : function, the objective function to evaluate at theta
+      theta   : np.array, the current parameter vector
+      m       : np.array, first moment estimates (should have same shape as theta)
+      v       : np.array, second moment estimates (should have same shape as theta)
+      t       : int, current time step (>=1) for bias correction
+      h       : float, finite difference step size
+      k       : int or None, if int then update only coordinate k, else update all coordinates
+      beta1   : float, exponential decay rate for the first moment estimates
+      beta2   : float, exponential decay rate for the second moment estimates
+      epsilon : float, a small constant for numerical stability
+      
+    Returns:
+      If k is provided: the Adam-adjusted gradient for coordinate k.
+      If k is None: an array of Adam-adjusted gradients for all coordinates.
+      
+    Note:
+      In your optimization loop you would typically update theta as:
+          theta[k] = theta[k] - lr * (m_hat / (sqrt(v_hat) + epsilon))
+      where m_hat and v_hat are the bias-corrected moment estimates.
+    """
+    
+    if k is not None:
+        # Create a basis vector for coordinate k
+        e = np.zeros_like(theta)
+        e[k] = 1
+        # Compute finite difference for coordinate k
+        grad = (f(theta + h * e) - f(theta - h * e)) / (2 * h)
+        if np.isnan(grad):
+            print(f"NaN encountered for coordinate {k} with f(theta+h*e)={f(theta + h * e)} and f(theta-h*e)={f(theta - h * e)}")
+            return None
+        
+        # Update the first and second moments for coordinate k
+        m[k] = beta1 * m[k] + (1 - beta1) * grad
+        v[k] = beta2 * v[k] + (1 - beta2) * grad**2
+        # Compute bias-corrected moment estimates
+        m_hat = m[k] / (1 - beta1**t[k])
+        v_hat = v[k] / (1 - beta2**t[k])
+        t[k] += 1
+        # Return the coordinate-wise Adam gradient (the step factor)
+        return m_hat / (np.sqrt(v_hat) + epsilon)
+    
+    else:
+        # Compute for all coordinates
+        adam_grad = np.zeros_like(theta)
+        for i in range(len(theta)):
+            e = np.zeros_like(theta)
+            e[i] = 1
+            grad = (f(theta + h * e) - f(theta - h * e)) / (2 * h)
+            if np.isnan(grad):
+                print(f"NaN encountered for coordinate {i}")
+                continue  # or handle as needed
+            # Update moments for coordinate i
+            m[i] = beta1 * m[i] + (1 - beta1) * grad
+            v[i] = beta2 * v[i] + (1 - beta2) * grad**2
+            # Bias correction
+            m_hat = m[i] / (1 - beta1**t)
+            v_hat = v[i] / (1 - beta2**t)
+            adam_grad[i] = m_hat / (np.sqrt(v_hat) + epsilon)
+
+        return adam_grad
+
 
 # -------------------------
 # Descent methods
@@ -192,10 +290,13 @@ def musketeer(x0, f, grad_f, epochs, T, gamma, lambda_seq, eta, gain_type='abs',
         history.append(f(x))
         evals.append(eval_count)
         
+        if np.isnan(gain_phase).any():
+            print("NANS GAIN PHASE")
+
         lambda_n = lambda_seq[n] if n < len(lambda_seq) else lambda_seq[-1]
         d, G = exploit_phase(G, gain_phase, n, lambda_n, eta, norm=norm)
 
-        print("iter: ", n + 1, " max diff is :", np.max(d) - np.min(d), "from coordinate ", np.argmax(d), "max gain is: ", np.max(G))
+        #print("iter: ", n + 1, " max diff is :", np.max(d) - np.min(d), "from coordinate ", np.argmax(d), "max gain is: ", np.max(G))
 
         if callback is not None and n % n_calls == 0:
             callback(x, eval_count)
